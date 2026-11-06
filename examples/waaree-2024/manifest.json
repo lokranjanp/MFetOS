@@ -1,0 +1,41 @@
+{
+  "issuer": {
+    "ipo_id": "waaree-2024",
+    "legal_name": "Waaree Energies Limited",
+    "cin": "U29248MH1990PLC059463",
+    "aliases": ["Anmol Fluid Connectors Private Limited", "Waaree Solar Private Limited"],
+    "board": "mainboard",
+    "sector": "manufacturing",
+    "status": "upcoming"
+  },
+  "documents": [
+    {
+      "location": "https://www.axiscapital.co.in/contents/Waaree-Energies-Limited-RHP.pdf",
+      "source_url": "https://www.axiscapital.co.in/contents/Waaree-Energies-Limited-RHP.pdf",
+      "kind": "rhp",
+      "published_at": "2024-10-15T23:59:59+05:30",
+      "publication_evidence": "https://www.sebi.gov.in/filings/public-issues/oct-2024/waaree-energies-limited-rhp_87562.html ; filing dated October 14; use conservative October 15 end-of-day for attachment availability",
+      "publication_status": "verified",
+      "expected_sha256": "60b61edee1451b7689064740a52d525744e0d1a61e516461dcd55ad768e37c0c"
+    },
+    {
+      "location": "https://www.axiscapital.co.in/contents/Waaree-Energies-Limited-Price-Band-Ad.pdf",
+      "source_url": "https://www.axiscapital.co.in/contents/Waaree-Energies-Limited-Price-Band-Ad.pdf",
+      "kind": "price_band",
+      "published_at": "2024-10-17T23:59:59+05:30",
+      "publication_evidence": "Dated public price-band advertisement, read with October 15 corrigendum; conservatively included at October 17 end-of-day, not at signing time",
+      "publication_status": "verified",
+      "expected_sha256": "b6ed7ab7bf4cd9b21082b21ab87e494631cdd5e8ef793fedc8ab44063880184f"
+    },
+    {
+      "location": "https://www.axiscapital.co.in/contents/Waaree-Energies-Limited-RHP-Stat-Ad-cum-Corrigendum.pdf",
+      "source_url": "https://www.axiscapital.co.in/contents/Waaree-Energies-Limited-RHP-Stat-Ad-cum-Corrigendum.pdf",
+      "kind": "amendment",
+      "published_at": "2024-10-16T23:59:59+05:30",
+      "publication_evidence": "Public statutory advertisement/corrigendum dated October 15, 2024; conservative next-day availability",
+      "publication_status": "verified",
+      "amended_metrics": ["peer_premier_order_book"],
+      "expected_sha256": "d39f382f2aa549981b2337650ee2fbc26ddb1a71dc5604ae0bb63085b93b19a5"
+    }
+  ]
+}
