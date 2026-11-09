@@ -43,9 +43,9 @@ def build_graph(service, checkpointer):
     store = service.store
 
     def inputs(state):
-        raw = store.get("run_inputs", state["run_id"])
+        raw = store.load_run_inputs(state["run_id"])
         return (
-            Run.model_validate(store.get("run", state["run_id"])),
+            Run.model_validate(store.load_run(state["run_id"])),
             Manifest.model_validate(raw["manifest"]),
             raw,
         )
@@ -54,10 +54,14 @@ def build_graph(service, checkpointer):
         store.update_run(state["run_id"], stage=name)
 
     def documents(state):
-        return [Document.model_validate(store.get("document", i)) for i in state.get("document_ids", [])]
+        raw = store.load_run_inputs(state["run_id"])
+        return [
+            Document.model_validate(store.load_document(i, raw.get("extraction_ids", {}).get(i)))
+            for i in state.get("document_ids", [])
+        ]
 
     def facts(state):
-        return [Fact.model_validate(store.get("fact", i)) for i in state.get("fact_ids", [])]
+        return [Fact.model_validate(store.load_fact(i)) for i in state.get("fact_ids", [])]
 
     async def resolve(state):
         stage(state, "resolve_issuer_cutoff")
@@ -79,14 +83,14 @@ def build_graph(service, checkpointer):
             if issuer.board == "unknown" or issuer.sector == "unknown":
                 raise ValueError("Resume must resolve board and sector")
             raw["manifest"] = manifest.model_dump(mode="json")
-            store.put("run_inputs", run.run_id, raw, run.ipo_id)
+            store.save_run_inputs(run.run_id, raw)
             unsupported = issuer.board == "sme" or not supported_sector(issuer.sector)
         return {"unsupported": unsupported, "retrieval_round": 0, "gaps": [], "conflicts": []}
 
     async def discover(state):
         stage(state, "discover_version_documents")
         run, manifest, raw = inputs(state)
-        docs = [Document.model_validate(store.get("document", i)) for i in raw["document_ids"]]
+        docs = [Document.model_validate(store.load_document(i)) for i in raw["document_ids"]]
         applicable = select_documents(docs, run.as_of)
         gaps = [
             f"Document excluded: {d.source.kind}; publication unverified/unknown or after cutoff"
@@ -128,18 +132,18 @@ def build_graph(service, checkpointer):
             all_facts.extend(fs)
             all_evidence.extend(es)
         selected, conflicts = select_facts(all_facts, docs, all_evidence)
+        for e in all_evidence:
+            store.save_evidence(e)
         for f in all_facts:
-            store.put("fact", f.fact_id, f, f.ipo_id)
+            store.save_fact(f)
         # Store conflict state on selected facts too.
         for f in selected:
-            store.put("fact", f.fact_id, f, f.ipo_id)
-        for e in all_evidence:
-            store.put("evidence", e.evidence_id, e, e.ipo_id)
+            store.save_fact(f)
         # Imported demand must reference existing, eligible evidence for this issue.
         ev_ids = {e.evidence_id for e in all_evidence}
         for s in manifest.subscriptions:
             for eid in s.evidence_ids:
-                e = store.get("evidence", eid)
+                e = store.load_evidence(eid)
                 if e and e["ipo_id"] == run.ipo_id:
                     ev = Evidence.model_validate(e)
                     if ev.published_at and ev.published_at <= run.as_of:
@@ -176,7 +180,7 @@ def build_graph(service, checkpointer):
         # Retry only declared, eligible inputs that previously failed. No speculative endpoints.
         warnings = []
         existing = {
-            Document.model_validate(store.get("document", i)).source.location for i in raw["document_ids"]
+            Document.model_validate(store.load_document(i)).source.location for i in raw["document_ids"]
         }
         for spec in manifest.documents:
             if spec.location not in existing and spec.published_at and spec.published_at <= run.as_of:
@@ -184,12 +188,14 @@ def build_graph(service, checkpointer):
                     from .ingestion import ingest
 
                     doc = await asyncio.wait_for(
-                        ingest(store, run.ipo_id, spec, service.fetcher), timeout=300
+                        ingest(store, run.ipo_id, spec, service.fetcher, service.settings),
+                        timeout=service.settings.docling_timeout + 60,
                     )
                     raw["document_ids"].append(doc.document_id)
+                    raw.setdefault("extraction_ids", {})[doc.document_id] = doc.extraction_id
                 except Exception as exc:
                     warnings.append(f"Targeted retrieval unavailable: {type(exc).__name__}")
-        store.put("run_inputs", run.run_id, raw, run.ipo_id)
+        store.save_run_inputs(run.run_id, raw)
         # Record targeted section retrieval for recoverable extraction gaps.
         pages = store.retrieve(run.ipo_id, "revenue profit consolidated cash flow", limit=6)
         return {
@@ -208,7 +214,7 @@ def build_graph(service, checkpointer):
                 selected = [p for p in doc.pages if p.section in {"business", "governance"}][:8]
                 try:
                     batch = await asyncio.wait_for(
-                        OllamaResearch(service.settings).extract(
+                        OllamaResearch(service.settings, observer=service.observer).extract(
                             [{"pdf_page": p.pdf_page, "text": p.text[:8000]} for p in selected]
                         ),
                         timeout=service.settings.model_timeout,
@@ -236,8 +242,8 @@ def build_graph(service, checkpointer):
                 except Exception as exc:
                     branch.gaps.append(f"Optional model unavailable: {type(exc).__name__}")
         for e in evs:
-            store.put("evidence", e.evidence_id, e, e.ipo_id)
-        store.put("branch_evidence", state["run_id"], [e.evidence_id for e in evs])
+            store.save_evidence(e)
+        store.save_branch_evidence(state["run_id"], [e.evidence_id for e in evs])
         return {"branches": {branch.name: branch.model_dump(mode="json")}}
 
     async def financial(state):
@@ -249,13 +255,13 @@ def build_graph(service, checkpointer):
         peer_data = {}
         peer_fact_ids, peer_evidence_ids = [], []
         for pid, payload in raw.get("peers", {}).items():
-            pf, pe, pc = service.facts_for_ids(payload["document_ids"], run.as_of)
+            pf, pe, pc = service.facts_for_ids(
+                payload["document_ids"], run.as_of, payload.get("extraction_ids")
+            )
             peer_data[pid] = (Manifest.model_validate(payload["manifest"]), pf)
             peer_fact_ids.extend(f.fact_id for f in pf)
             peer_evidence_ids.extend(e.evidence_id for e in pe)
-        store.put(
-            "run_peer_inputs", run.run_id, {"fact_ids": peer_fact_ids, "evidence_ids": peer_evidence_ids}
-        )
+        store.save_peer_inputs(run.run_id, {"fact_ids": peer_fact_ids, "evidence_ids": peer_evidence_ids})
         branch = peer_branch(facts(state), peer_data, run.as_of, manifest.peer_rationales)
         return {"branches": {branch.name: branch.model_dump(mode="json")}}
 
@@ -266,7 +272,7 @@ def build_graph(service, checkpointer):
             s
             for s in manifest.subscriptions
             if set(s.evidence_ids) <= valid_ids
-            and subscription_matches(s, [store.get("evidence", e) for e in s.evidence_ids])
+            and subscription_matches(s, [store.load_evidence(e) for e in s.evidence_ids])
         ]
         branch = demand_branch(valid, run.as_of, facts(state))
         if len(valid) < len(manifest.subscriptions):
@@ -296,10 +302,10 @@ def build_graph(service, checkpointer):
     async def validate_render(state):
         stage(state, "validate_claims_citations")
         run, manifest, raw = inputs(state)
-        ev_ids = set(state.get("evidence_ids", [])) | set(store.get("branch_evidence", run.run_id) or [])
-        peer_inputs = store.get("run_peer_inputs", run.run_id) or {"fact_ids": [], "evidence_ids": []}
+        ev_ids = set(state.get("evidence_ids", [])) | set(store.load_branch_evidence(run.run_id) or [])
+        peer_inputs = store.load_peer_inputs(run.run_id) or {"fact_ids": [], "evidence_ids": []}
         ev_ids.update(peer_inputs["evidence_ids"])
-        evs = [Evidence.model_validate(store.get("evidence", eid)) for eid in sorted(ev_ids)]
+        evs = [Evidence.model_validate(store.load_evidence(eid)) for eid in sorted(ev_ids)]
         branches = {k: Branch.model_validate(v) for k, v in state.get("branches", {}).items()}
         report = make_report(
             run,
@@ -310,11 +316,11 @@ def build_graph(service, checkpointer):
             state.get("conflicts", []),
             state.get("gaps", []),
             state.get("unsupported", False),
-            [Fact.model_validate(store.get("fact", i)) for i in peer_inputs["fact_ids"]],
+            [Fact.model_validate(store.load_fact(i)) for i in peer_inputs["fact_ids"]],
         )
         # Round-trip ensures the exact persisted JSON satisfies the public contract.
         report = Report.model_validate_json(report.model_dump_json())
-        store.put("report", run.run_id, report, run.ipo_id)
+        store.save_report(report)
         status = "unsupported" if state.get("unsupported") else "insufficient_evidence"
         if report.long_term.status == "supported" or report.listing.status == "supported":
             status = "completed"
@@ -336,9 +342,19 @@ def build_graph(service, checkpointer):
         "validate_render": validate_render,
     }
     for name, fn in nodes.items():
+
+        def instrument(node_name, node_fn):
+            async def wrapped(state):
+                with service.observer.span(
+                    "graph." + node_name, correlation_id=state["run_id"], run_id=state["run_id"]
+                ):
+                    return await node_fn(state)
+
+            return wrapped
+
         g.add_node(
             name,
-            fn,
+            instrument(name, fn),
             retry_policy=RetryPolicy(max_attempts=1),
             timeout=TimeoutPolicy(run_timeout=600 if name == "retrieve_gaps" else 180),
         )

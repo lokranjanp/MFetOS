@@ -16,6 +16,13 @@ FIXTURE = Path(__file__).parent / "fixtures" / "synthetic_prospectus.json"
 CUTOFF = datetime.fromisoformat("2024-10-17T23:59:59+05:30")
 
 
+@pytest.fixture(autouse=True)
+def offline_tracing(monkeypatch):
+    # A developer's .env must not make this offline suite contact LangSmith.
+    # Exporter tests explicitly override this setting and use an in-memory client.
+    monkeypatch.setenv("LANGSMITH_TRACING", "false")
+
+
 def make_pdf(path, fixture=None):
     data = fixture or json.loads(FIXTURE.read_text())
     styles = getSampleStyleSheet()

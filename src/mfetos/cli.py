@@ -51,12 +51,26 @@ def main():
     sub.add_parser("worker")
     sub.add_parser("serve")
     sub.add_parser("providers")
+    db_command = sub.add_parser("db")
+    db_command.add_argument("action", choices=["migrate", "summary"])
+    ui_command = sub.add_parser("ui", help="Launch local Streamlit UI and supervised worker")
+    ui_command.add_argument("--port", type=int, default=8501)
+    parsers_command = sub.add_parser("parsers")
+    parsers_command.add_argument("action", choices=["prepare"])
     args = parser.parse_args()
     settings = Settings()
     if args.data_dir:
         settings.data_dir = args.data_dir
     # Suppress HTTP request lines, which can contain signed URLs/credential material.
     logging.getLogger("httpx").setLevel(logging.WARNING)
+    if args.command == "ui":
+        from .ui_launcher import launch
+
+        try:
+            launch(settings, args.port)
+        except (ValueError, RuntimeError) as exc:
+            parser.exit(2, str(exc) + "\n")
+        return
     if args.command == "serve":
         from .server import create_server
 
@@ -64,6 +78,18 @@ def main():
         return
 
     async def run():
+        if args.command == "parsers":
+            from .parsers import prepare_models
+
+            return await asyncio.to_thread(prepare_models, settings)
+        if args.command == "db":
+            if args.action == "migrate":
+                from .migrations import migrate
+
+                return migrate(settings.data_dir)
+            from .storage import Store
+
+            return Store(settings.data_dir).summary()
         service = ResearchService(settings)
         if args.command == "ingest":
             raw = json.loads(args.manifest.read_text())
@@ -71,7 +97,12 @@ def main():
             for d in raw.get("documents", []):
                 if not d["location"].startswith(("https://", "http://")):
                     d["location"] = str((args.manifest.parent / d["location"]).resolve())
-            return await service.register(Manifest.model_validate(raw))
+            job = service.start_ingestion(Manifest.model_validate(raw))
+            async with service.workers():
+                while service.get_ingestion_status(job["id"])["status"] in {"queued", "running"}:
+                    await asyncio.sleep(0.2)
+            result = service.get_ingestion_status(job["id"])
+            return json.loads(result["result_json"]) if result["result_json"] else result
         if args.command == "search":
             return service.search_ipos(args.query)
         if args.command == "discover":
@@ -121,6 +152,10 @@ def main():
         else:
             print(json.dumps(result, indent=2, default=str))
     except (ValueError, OSError) as exc:
+        from .storage import MigrationRequired
+
+        if isinstance(exc, MigrationRequired):
+            parser.exit(2, str(exc) + "\n")
         parser.exit(2, f"{type(exc).__name__}: invalid or unavailable local input\n")
 
 

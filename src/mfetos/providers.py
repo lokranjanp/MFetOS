@@ -31,10 +31,11 @@ class PriceProvider(Protocol):
 
 
 class Fetcher:
-    def __init__(self, settings: Settings, transport=None):
+    def __init__(self, settings: Settings, transport=None, observer=None):
         self.settings = settings
         self.transport = transport
         self.semaphore = asyncio.Semaphore(4)
+        self.observer = observer
 
     async def check_url(self, url: str):
         parsed = urlsplit(url)
@@ -53,6 +54,12 @@ class Fetcher:
             raise ProviderError("Private/local network destinations are not permitted")
 
     async def bytes(self, url: str, limit: int = 120 * 1024 * 1024) -> bytes:
+        from contextlib import nullcontext
+
+        with self.observer.span("provider.fetch", counts={"requests": 1}) if self.observer else nullcontext():
+            return await self._bytes(url, limit)
+
+    async def _bytes(self, url: str, limit: int) -> bytes:
         async with self.semaphore:
             async with httpx.AsyncClient(
                 timeout=self.settings.http_timeout,
@@ -164,59 +171,6 @@ class UpstoxPrices:
                 return ToolResult(status="provider_unavailable")
 
 
-class TrendlynePeers:
-    READ_TOOLS = {
-        "search_entities",
-        "search_financial_parameters",
-        "get_stock_parameter_values",
-        "get_document_search_results",
-    }
-
-    def __init__(self, settings: Settings):
-        self.settings = settings
-
-    async def call(self, name: str, arguments: dict) -> ToolResult:
-        if name not in self.READ_TOOLS:
-            raise ProviderError("Only documented peer research tools are permitted")
-        if not self.settings.trendlyne_license_ack or not self.settings.allow_licensed_retention:
-            return ToolResult(status="license_required")
-        if not self.settings.trendlyne_url or not self.settings.trendlyne_token.get_secret_value():
-            return ToolResult(status="credentials_missing")
-        # Use the official MCP client and negotiate the actual provider schema.
-        import jsonschema
-        from mcp.client.streamable_http import streamable_http_client
-
-        try:
-            async with httpx.AsyncClient(
-                headers={"Authorization": "Bearer " + self.settings.trendlyne_token.get_secret_value()},
-                timeout=self.settings.http_timeout,
-                trust_env=False,
-            ) as http:
-                async with streamable_http_client(self.settings.trendlyne_url, http_client=http) as streams:
-                    from mcp import ClientSession
-
-                    async with ClientSession(streams[0], streams[1]) as session:
-                        await session.initialize()
-                        tools = (await session.list_tools()).tools
-                        tool = next((t for t in tools if t.name == name), None)
-                        if tool is None:
-                            return ToolResult(status="capability_unavailable")
-                        jsonschema.validate(arguments, tool.inputSchema)
-                        result = await session.call_tool(name, arguments)
-                        return ToolResult(
-                            status="unverified",
-                            data=result.model_dump(mode="json"),
-                            warnings=[
-                                "Vendor values require source/publication validation before historical use"
-                            ],
-                        )
-        except Exception:
-            return ToolResult(
-                status="provider_unavailable",
-                warnings=["Check credentials, negotiated schema and SDK transport"],
-            )
-
-
 class TextCandidate(BaseModel):
     pdf_page: int = Field(ge=1)
     quote: str = Field(min_length=10, max_length=1500)
@@ -229,10 +183,21 @@ class TextBatch(BaseModel):
 
 
 class OllamaResearch:
-    def __init__(self, settings: Settings):
+    def __init__(self, settings: Settings, observer=None):
         self.settings = settings
+        self.observer = observer
 
     async def extract(self, pages: list[dict]) -> TextBatch:
+        from contextlib import nullcontext
+
+        with (
+            self.observer.span("model.ollama", counts={"pages": len(pages)})
+            if self.observer
+            else nullcontext()
+        ):
+            return await self._extract(pages)
+
+    async def _extract(self, pages: list[dict]) -> TextBatch:
         if not self.settings.ollama_model:
             raise ProviderError("model_not_configured")
         # Retrieved text is explicitly delimited data, with no tool or secret access.
@@ -266,11 +231,6 @@ def capabilities() -> list[dict]:
         },
         {"provider": "nse_website", "status": "terms_restricted", "use": "Manual documents only"},
         {"provider": "bse_website", "status": "access_may_be_blocked", "use": "No bypass"},
-        {
-            "provider": "trendlyne",
-            "status": "optional_credentials_and_license",
-            "use": "Listed peers; no assumed point-in-time data",
-        },
         {"provider": "upstox", "status": "optional_credentials_and_license", "use": "Read-only daily prices"},
         {"provider": "kite", "status": "deferred", "use": "Storage/redistribution restrictions"},
         {"provider": "tavily", "status": "terms_clarification_required", "use": "Disabled"},

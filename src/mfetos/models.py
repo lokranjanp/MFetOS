@@ -47,6 +47,7 @@ class DocumentInput(Model):
     # A correction overrides only these metric names; it never replaces the whole RHP.
     amended_metrics: list[str] = Field(default_factory=list)
     expected_sha256: str | None = Field(default=None, pattern=r"^[a-f0-9]{64}$")
+    parser_backend: Literal["pdfplumber", "docling"] | None = None
 
 
 class Page(Model):
@@ -55,7 +56,8 @@ class Page(Model):
     text: str
     section: str = "other"
     tables: list[list[list[str | None]]] = Field(default_factory=list)
-    method: Literal["text", "ocr", "unavailable"] = "text"
+    method: Literal["text", "ocr", "docling", "unavailable"] = "text"
+    provenance: list[dict[str, Any]] = Field(default_factory=list)
 
 
 class Document(Model):
@@ -67,6 +69,8 @@ class Document(Model):
     pages: list[Page] = Field(default_factory=list)
     warnings: list[str] = Field(default_factory=list)
     extractor_version: str = "1"
+    extraction_id: str | None = None
+    parser_backend: str = "pdfplumber"
 
 
 class Evidence(Model):
@@ -268,6 +272,8 @@ class Run(Model):
     updated_at: AwareDatetime = Field(default_factory=now)
     error: str | None = None
     decision: dict[str, Any] | None = None
+    trace_id: str | None = None
+    trace_url: str | None = None
 
 
 class ToolResult(Model):

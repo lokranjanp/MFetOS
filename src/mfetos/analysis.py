@@ -204,9 +204,13 @@ def offer_valuation(facts: list[Fact]) -> Branch:
         shares = None
         if price and pre and fresh and diluted:
             try:
-                shares = post_issue_shares(pre.value, price.value, fresh.value, incremental_diluted=diluted.value)
+                shares = post_issue_shares(
+                    pre.value, price.value, fresh.value, incremental_diluted=diluted.value
+                )
             except ValueError:
-                out.gaps.append(f"{endpoint}: invalid/non-meaningful issuance denominator; valuation unavailable")
+                out.gaps.append(
+                    f"{endpoint}: invalid/non-meaningful issuance denominator; valuation unavailable"
+                )
         out.metrics.append(
             metric(
                 f"post_issue_shares_{endpoint}",

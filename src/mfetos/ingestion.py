@@ -173,7 +173,12 @@ def extract_pdf(path: Path) -> tuple[list[Page], list[str]]:
     return pages, warnings
 
 
-async def ingest(store: Store, ipo_id: str, source: DocumentInput, fetcher) -> Document:
+async def ingest(store: Store, ipo_id: str, source: DocumentInput, fetcher, settings=None) -> Document:
+    from .config import Settings
+    from .parsers import parse_pdf, parser_spec
+
+    settings = settings or Settings(data_dir=store.root)
+    spec = parser_spec(settings, source)
     original = store.root / "documents" / f"{source.expected_sha256}.pdf" if source.expected_sha256 else None
     if original and original.is_file():
         content = await asyncio.to_thread(original.read_bytes)
@@ -187,29 +192,41 @@ async def ingest(store: Store, ipo_id: str, source: DocumentInput, fetcher) -> D
     if source.expected_sha256 and sha != source.expected_sha256:
         raise ValueError("Document checksum mismatch")
     document_id = digest([ipo_id, sha, source.model_dump(mode="json")])[:32]
-    cached = store.get("document", document_id)
-    if cached:
+    extraction_id = digest([sha, spec])[:32]
+    cached = store.load_document(document_id)
+    if cached and cached.get("extraction_id") == extraction_id:
         return Document.model_validate(cached)
     path = store.root / "documents" / f"{sha}.pdf"
     if not path.exists():
         path.write_bytes(content)
-    retrieval = store.get("blob", sha)
+    retrieval = store.load_blob(sha)
     if retrieval is None:
         retrieval = {"retrieved_at": now().isoformat()}
-        store.put("blob", sha, retrieval)
-    cached_pages = store.get("extraction", sha)
-    if cached_pages and cached_pages.get("extractor_version", "1") == EXTRACTOR_VERSION:
+        store.save_blob(sha, retrieval)
+    cached_pages = store.load_extraction(extraction_id)
+    if cached_pages:
         pages = [Page.model_validate(p) for p in cached_pages["pages"]]
         warnings = cached_pages["warnings"]
     else:
-        pages, warnings = await asyncio.to_thread(extract_pdf, path)
-        store.put(
-            "extraction",
-            sha,
+        pages, warnings, raw = await asyncio.to_thread(parse_pdf, path, settings, spec)
+        raw_path = None
+        if raw is not None:
+            import json
+
+            directory = store.root / "extractions"
+            directory.mkdir(exist_ok=True)
+            raw_path = f"extractions/{extraction_id}.json"
+            (store.root / raw_path).write_text(json.dumps(raw, ensure_ascii=False))
+        store.save_extraction(
+            extraction_id,
             {
+                "sha256": sha,
+                "backend": spec["backend"],
+                "options": spec,
+                "raw_artifact_path": raw_path,
                 "pages": [p.model_dump() for p in pages],
                 "warnings": warnings,
-                "extractor_version": EXTRACTOR_VERSION,
+                "extractor_version": spec["version"],
             },
         )
     doc = Document(
@@ -220,15 +237,18 @@ async def ingest(store: Store, ipo_id: str, source: DocumentInput, fetcher) -> D
         retrieved_at=retrieval["retrieved_at"],
         pages=pages,
         warnings=warnings,
+        extraction_id=extraction_id,
+        parser_backend=spec["backend"],
+        extractor_version=spec["version"],
     )
-    store.put("document", document_id, doc, ipo_id)
+    store.save_document(doc)
     store.index_document(doc)
     return doc
 
 
 def evidence_for(doc: Document, page: Page, snippet: str) -> Evidence:
     return Evidence(
-        evidence_id=digest([doc.document_id, page.pdf_page, snippet])[:32],
+        evidence_id=digest([doc.document_id, doc.extraction_id, page.pdf_page, snippet])[:32],
         ipo_id=doc.ipo_id,
         document_id=doc.document_id,
         source_url=doc.source.source_url,
