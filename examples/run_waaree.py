@@ -22,7 +22,10 @@ async def run(args):
     if not registration.data["document_ids"]:
         raise SystemExit("No documents accessible. Supply local PDFs with --rhp/--price-band/--amendment.")
     job = service.start_ipo_analysis("waaree-2024", as_of=datetime.fromisoformat("2024-10-17T23:59:59+05:30"))
-    await service.execute(job.run_id)
+    if job.status in {"queued", "running"}:
+        async with service.workers():
+            while service.get_analysis_status(job.run_id).status in {"queued", "running"}:
+                await asyncio.sleep(0.2)
     result = service.get_analysis_report(job.run_id)
     if result.status != "ok":
         raise SystemExit(service.get_analysis_status(job.run_id).model_dump_json())

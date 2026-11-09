@@ -39,15 +39,12 @@ async def test_amendment_only_updates_named_fields(service, manifest):
 async def test_checkpoint_recovers_without_rerunning_completed_branches(service, manifest, monkeypatch):
     await service.register(manifest)
     job = service.start_ipo_analysis(manifest.issuer.ipo_id, as_of=CUTOFF)
+
     # Fail only the final report write, after all four branch results were checkpointed.
-    original = service.store.put
+    def fail_report(*args, **kwargs):
+        raise RuntimeError("simulated storage failure")
 
-    def fail_report(kind, *args, **kwargs):
-        if kind == "report":
-            raise RuntimeError("simulated storage failure")
-        return original(kind, *args, **kwargs)
-
-    monkeypatch.setattr(service.store, "put", fail_report)
+    monkeypatch.setattr(service.store, "save_report", fail_report)
     await service.execute(job.run_id)
     assert service.get_analysis_status(job.run_id).status == "failed"
     fresh = ResearchService(service.settings)

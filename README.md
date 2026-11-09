@@ -2,13 +2,56 @@
 
 Evidence-backed research for Indian mainboard, non-financial IPOs, using **Python, LangGraph, Pydantic and the official MCP SDK**. It produces separate long-term and listing conclusions, with validated JSON, readable Markdown and page-level evidence. It has no order execution capability.
 
+## Streamlit UI, storage and tracing
+
+```bash
+.venv/bin/python -m pip install -e '.[test,ui]' -c requirements.lock
+# For an existing v1 data directory, stop its workers first:
+.venv/bin/python -m mfetos --data-dir data/waaree db migrate
+.venv/bin/python -m mfetos --data-dir data/waaree ui
+```
+
+Open **http://127.0.0.1:8501**. The launcher supervises Streamlit and a worker; closing the browser does not cancel durable jobs, and widget reruns never spawn another worker. Ctrl+C stops only the launcher's own children. If you run Streamlit directly instead, start `mfetos worker` separately with the same data directory.
+
+The **Research** tab accepts uploaded PDFs and HTTPS URLs, explicit issuer/publication details, a parser selection and an India-time analysis cutoff. Ingestion and analysis execute in the durable queue. **Runs** lists saved research and lets you resolve existing material ambiguities or retry failures. **Data** provides read-only, paginated named-table views. Reports show the two conclusions separately, with financial tables, gaps, downloadable JSON/Markdown and original-page evidence. Uploaded bytes are stored under content hashes; publication verification is never inferred from an upload date.
+
+The research store now has named tables for issuers, IPOs, documents, extraction versions, pages/table cells, facts/evidence, runs, metrics, job attempts and events. See the [schema diagram, inspection queries and migration/rollback instructions](docs/storage.md). Migration preserves existing IDs/reports and makes a timestamped backup; the LangGraph checkpoint file is not rewritten.
+
+### Optional Docling parsing
+
+Docling is integrated as a selectable local backend. pdfplumber remains the lightweight default.
+
+```bash
+.venv/bin/python -m pip install -e '.[docling]'
+.venv/bin/python -m mfetos parsers prepare
+```
+
+The explicit preparation command downloads local layout, table and RapidOCR models into `<data-dir>/models/docling`. It does not download VLM/audio models. Select **docling** in the UI, set `MFETOS_PDF_PARSER=docling`, or set a document's `parser_backend` in its manifest. When using another data directory, set `MFETOS_DOCLING_ARTIFACTS_PATH` to the prepared directory or prepare that directory separately.
+
+Conversion uses local models with remote services disabled. Missing packages/models and incomplete conversions are explicit errors; there is no silent switch to another parser. Page references, table grids, bounding boxes and raw Docling JSON are retained. Extraction caches include backend, installed package version and options; frozen runs retain their extraction revision.
+
+### Logs and LangSmith
+
+Copy `.env.example` to `.env` and configure:
+
+```dotenv
+LANGSMITH_TRACING=true
+LANGSMITH_API_KEY=your-key
+LANGSMITH_PROJECT=mfetos
+LANGSMITH_ENDPOINT=https://api.smith.langchain.com
+```
+
+Tracing is off by default and is strictly **metadata only** when enabled: IDs, stages, durations, counts and safe error codes. PDF/evidence text, model messages, report contents, credentials and signed URLs are never exported. Implicit LangGraph state tracing is suppressed even if global tracing variables are enabled. Explicit SDK spans connect ingestion, graph nodes and fetch operations; the UI shows a LangSmith link when the exporter can obtain it. Network/authentication failures leave local research operational.
+
+Structured JSONL logs go to stderr and `<data-dir>/logs/mfetos-<pid>.jsonl`, with rotation; operational events also appear in the run timeline. `MFETOS_LOG_LEVEL` and `MFETOS_LOG_DIR` configure local output. Metadata-only logging applies at DEBUG too. MCP stdout remains reserved for its protocol. Keys are read from settings, not collected by the UI.
+
 ## Run it
 
 Python 3.11+ is required. From the repository root:
 
 ```bash
 python -m venv .venv
-.venv/bin/python -m pip install -e '.[test]' -c requirements.lock
+.venv/bin/python -m pip install -e '.[test,ui]' -c requirements.lock
 .venv/bin/python -m pytest -q
 .venv/bin/python -m mfetos providers
 ```
@@ -91,7 +134,7 @@ The server uses local stdio and starts its own recoverable worker. Stdout is res
 
 `objective` is `both`, `long_term` or `listing`. The shared research graph retains both conclusions so their differing evidence coverage remains visible. Explicit cutoffs must include a timezone; omitted cutoffs freeze the current instant.
 
-Resources: `ipo://reports/{run_id}/report.json`, `ipo://reports/{run_id}/report.md`, `ipo://evidence/{evidence_id}`. Upload/registration is through the local CLI, avoiding arbitrary filesystem access through MCP. There is no remotely exposed HTTP service in this MVP.
+Resources: `ipo://reports/{run_id}/report.json`, `ipo://reports/{run_id}/report.md`, `ipo://evidence/{evidence_id}`. Upload/registration is through the local CLI or Streamlit UI, avoiding arbitrary filesystem access through MCP. The UI binds to localhost; MCP uses stdio.
 
 ## Evidence and financial rules
 
@@ -133,6 +176,7 @@ Eligible consolidated snapshots take precedence over exchange-specific data. Exc
 ```mermaid
 flowchart TD
     CLI[CLI: PDFs, URLs, manifests] --> ING[Hash, store, extract pages and tables]
+    UI[Streamlit: Research, Runs, Data] --> SVC
     MCP[Official MCP SDK: nine tools and resources] --> SVC[Research service]
     ING --> DB[(SQLite metadata, evidence, FTS and jobs)]
     SVC --> DB
@@ -153,9 +197,10 @@ flowchart TD
     VAL --> REPORT[JSON and Markdown: separate conclusions]
     REPORT --> MCP
     WORK --- CP[(Durable LangGraph SQLite checkpoints)]
+    WORK -. metadata only .-> OBS[JSONL events and optional LangSmith]
 ```
 
-SQLite is appropriate for this single-user local MVP. Queue leases and checkpoints survive process restarts; expired leases are reclaimed after up to 60 seconds. Independent branch outputs are persisted and joined once. Nodes have bounded timeouts, external fetches have three attempts, retrieval has a configurable round budget, and content hashes prevent duplicate document work. Model text has no filesystem, shell, broker or unrestricted tool access. Secrets are settings values and never enter graph state or prompts.
+Named SQLite tables and inspection views replace the generic JSON object store; see [database layout and migration](docs/storage.md). SQLite is appropriate for this single-user local MVP. Queue leases and checkpoints survive process restarts; expired leases are reclaimed after up to 60 seconds. Independent branch outputs are persisted and joined once. Nodes have bounded timeouts, external fetches have three attempts, retrieval has a configurable round budget, and content hashes prevent duplicate document work. Model text has no filesystem, shell, broker or unrestricted tool access. Secrets are settings values and never enter graph state or prompts.
 
 ## Discovery, models and providers
 
@@ -167,7 +212,7 @@ Discovery inspects public SEBI and Axis Capital document links. Results are cand
 
 For optional local model interpretation, install/run Ollama yourself, download a suitable model, then configure `MFETOS_LLM_PROVIDER=ollama` and `MFETOS_OLLAMA_MODEL`. The adapter uses the documented local `/api/chat` JSON-schema interface. It accepts exact source quotes only and marks interpretation as inference. Model arithmetic never enters financial calculations. The deterministic path remains fully runnable when the model is unavailable.
 
-[Provider capabilities and usage restrictions](docs/providers.md) records what was verified. Upstox and Trendlyne have optional read-only Python adapters, gated on credentials, applicable licensing and retained-data rights. They are not automatically treated as audited or point-in-time data. Tavily is disabled pending terms clarification; Kite is evaluated/deferred; TrueData needs a licensed corporate-data contract. Screener is manual only.
+[Provider capabilities and usage restrictions](docs/providers.md) records what was verified. Upstox has an optional read-only Python adapter, gated on credentials, applicable licensing and retained-data rights. Its responses are not automatically treated as audited or point-in-time data. Tavily is disabled pending terms clarification; Kite is evaluated/deferred; TrueData needs a licensed corporate-data contract. Screener is manual only.
 
 ## Tests and evaluation
 
@@ -175,8 +220,10 @@ For optional local model interpretation, install/run Ollama yourself, download a
 .venv/bin/python -m pytest -q
 .venv/bin/python -m ruff check src tests examples
 MFETOS_LIVE_TESTS=1 .venv/bin/python -m pytest tests/test_real_prospectus.py -q
+# After installing .[docling] and running parsers prepare in the default data directory:
+MFETOS_DOCLING_LIVE=1 .venv/bin/python -m pytest tests/test_docling_live.py -q
 ```
 
-The ordinary suite is offline and uses clearly fictional prospectus data under `tests/fixtures/`, rendered into temporary PDFs. It covers arithmetic, source selection, fiscal/basis separation, dilution/proceeds/leases, subscription deduplication, unsupported/insufficient evidence, human resume, durable checkpoint recovery and a complete ingestion-to-report-to-MCP subprocess path. The opt-in real test can use existing originals via `MFETOS_WAAREE_RHP`, `MFETOS_WAAREE_PRICE_BAND` and `MFETOS_WAAREE_AMENDMENT`.
+The ordinary suite is offline and uses clearly fictional prospectus data under `tests/fixtures/`, rendered into temporary PDFs. It covers arithmetic, source selection, fiscal/basis separation, dilution/proceeds/leases, subscription deduplication, unsupported/insufficient evidence, human resume, durable checkpoint recovery and a complete ingestion-to-report-to-MCP subprocess path. It also covers populated migration/rollback, Streamlit reruns and ingestion controls, parser provenance, and metadata-only/failing trace exporters. LangSmith network export is disabled in the offline suite. The opt-in real test can use existing originals via `MFETOS_WAAREE_RHP`, `MFETOS_WAAREE_PRICE_BAND` and `MFETOS_WAAREE_AMENDMENT`. The local Docling tests exercise table extraction through to a cited report and image-only PDF OCR using already prepared models.
 
 The [evaluation plan](docs/evaluation.md) separates extraction accuracy, citation support and numerical correctness from investment outcomes, and requires archived point-in-time inputs to prevent look-ahead leakage.

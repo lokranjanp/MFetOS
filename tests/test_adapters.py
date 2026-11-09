@@ -3,7 +3,7 @@ import pytest
 from conftest import CUTOFF
 
 from mfetos.models import Report
-from mfetos.providers import Fetcher, ProviderError, TrendlynePeers, UpstoxPrices
+from mfetos.providers import Fetcher, ProviderError, UpstoxPrices
 
 
 async def test_blocked_and_missing_credentials(service):
@@ -15,11 +15,6 @@ async def test_blocked_and_missing_credentials(service):
     assert (
         await UpstoxPrices(service.settings).daily("NSE_EQ|test", "2024-01-01", "2024-02-01")
     ).status == "license_required"
-    assert (
-        await TrendlynePeers(service.settings).call("search_entities", {"query": "test"})
-    ).status == "license_required"
-    with pytest.raises(ProviderError):
-        await TrendlynePeers(service.settings).call("place_order", {})
 
 
 async def test_post_cutoff_fact_rejected_and_run_frozen(service, manifest):
